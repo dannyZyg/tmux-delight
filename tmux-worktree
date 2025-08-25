@@ -1,0 +1,82 @@
+#!/bin/bash
+set -euo pipefail
+
+# Usage: tmux-worktree <git-worktree-root>
+# <git-worktree-root> is the bare repo (or directory containing worktrees/)
+
+if [ $# -lt 1 ]; then
+  echo "Usage: $(basename "$0") <git-worktree-root>" >&2
+  exit 1
+fi
+
+GIT_ROOT=$1
+WORKTREE_SEARCH_DIR="$GIT_ROOT/worktrees"
+
+if [ ! -d "$GIT_ROOT" ]; then
+  echo "Error: path '$GIT_ROOT' does not exist." >&2
+  exit 1
+fi
+
+if [ ! -d "$WORKTREE_SEARCH_DIR" ]; then
+  echo "Error: worktrees directory not found; git repo is not a bare repo." >&2
+  exit 1
+fi
+
+# Check if TMUX_CONFIG is set
+if [ -z "${TMUX_CONFIG:-}" ]; then
+  echo "Error: TMUX_CONFIG is not set. Exiting." >&2
+  exit 1
+fi
+
+# Disconnect from the current tmux session if connected
+if [ -n "${TMUX:-}" ]; then
+  tmux detach
+fi
+
+# Use fzf to list worktrees and capture the selected item
+SELECTED=$(find "$WORKTREE_SEARCH_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | fzf --prompt="Select a worktree: " --preview="ls -l $WORKTREE_SEARCH_DIR/{}" --preview-window=up:5 --print-query | tail -n1)
+
+# If no input is provided, exit
+if [ -z "$SELECTED" ]; then
+  echo "No input provided. Exiting."
+  exit 1
+fi
+
+SESSION_NAME=$(basename "$SELECTED")
+WORKTREE_PATH="$GIT_ROOT/$SESSION_NAME"
+
+# Determine default branch dynamically
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-}"
+if [ -z "$DEFAULT_BRANCH" ]; then
+  if origin_head_ref=$(git -C "$GIT_ROOT" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null); then
+    DEFAULT_BRANCH=${origin_head_ref##*/}
+  else
+    remote_head=$(git -C "$GIT_ROOT" remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF}') || true
+    if [ -n "${remote_head:-}" ]; then
+      DEFAULT_BRANCH="$remote_head"
+    elif git -C "$GIT_ROOT" show-ref --verify --quiet refs/heads/main; then
+      DEFAULT_BRANCH=main
+    else
+      DEFAULT_BRANCH=master
+    fi
+  fi
+fi
+
+if [ -d "$WORKTREE_PATH" ]; then
+  cd "$WORKTREE_PATH"
+else
+  cd "$GIT_ROOT"
+  echo "Checking if branch exists on remote"
+  if git ls-remote --exit-code --heads origin "$SELECTED" >/dev/null 2>&1; then
+    git worktree add -b "$SELECTED" "$WORKTREE_PATH" "origin/$SELECTED"
+  else
+    echo "Branch does not exist on remote - adding new local worktree (base: $DEFAULT_BRANCH)"
+    git worktree add "$WORKTREE_PATH" -b "$SELECTED" "$DEFAULT_BRANCH"
+  fi
+fi
+
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  tmux attach-session -t "$SESSION_NAME"
+else
+  tmux -f "$TMUX_CONFIG" new-session -s "$SESSION_NAME" -c "$WORKTREE_PATH"
+fi
