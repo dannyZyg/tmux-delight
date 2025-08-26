@@ -28,9 +28,10 @@ if [ -z "${TMUX_CONFIG:-}" ]; then
   exit 1
 fi
 
-# Disconnect from the current tmux session if connected
+# If already inside a tmux session, abort (must detach first)
 if [ -n "${TMUX:-}" ]; then
-  tmux detach
+  echo "Error: already inside a tmux session. Detach/exit tmux first." >&2
+  exit 1
 fi
 
 # Use fzf to list worktrees and capture the selected item
