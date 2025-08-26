@@ -38,30 +38,40 @@ fi
 EXISTING_DIRS=$(find "$WORKTREE_SEARCH_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -u)
 
 # fzf: allow typing a new branch name not yet a worktree
-RAW=$(printf '%s\n' "$EXISTING_DIRS" | fzf --prompt="Select or type branch: " --print-query --preview='SEL={}; if [ -n "$SEL" ]; then ls -l "$WORKTREE_SEARCH_DIR/$SEL" 2>/dev/null || echo "(new)"; fi' --preview-window=up:5)
+RAW=$(printf '%s\n' "$EXISTING_DIRS" | fzf --prompt="Select or type branch: " --print-query --preview='SEL={}; if [ -n "$SEL" ]; then ls -l "$WORKTREE_SEARCH_DIR/$SEL" 2>/dev/null || echo "(new)"; fi' --preview-window=up:5 || true)
 QUERY=$(printf '%s' "$RAW" | sed -n '1p')
 CHOICE=$(printf '%s' "$RAW" | sed -n '$p')
 
+BRANCH_NAME=""
+IS_EXISTING=0
 if [ -n "$CHOICE" ] && printf '%s\n' "$EXISTING_DIRS" | grep -Fxq "$CHOICE"; then
-  # Existing worktree chosen
-  SESSION_NAME="$CHOICE"
-  WORKTREE_PATH="$GIT_ROOT/$SESSION_NAME"
   BRANCH_NAME="$CHOICE"
+  IS_EXISTING=1
 else
   BRANCH_NAME="$QUERY"
-  if [ -z "$BRANCH_NAME" ]; then
-    echo "No input provided. Exiting." >&2
-    exit 1
-  fi
-  # Basic validation
+fi
+
+# Abort if nothing entered
+if [ -z "$BRANCH_NAME" ]; then
+  echo "No input provided. Exiting." >&2
+  exit 1
+fi
+
+# Normalize (strip CR)
+BRANCH_NAME=$(printf '%s' "$BRANCH_NAME" | tr -d '\r')
+
+# Validate new branch names (skip validation for existing dir names beyond emptiness)
+if [ $IS_EXISTING -eq 0 ]; then
   if printf '%s' "$BRANCH_NAME" | grep -q '[[:space:]]'; then
-    echo "Error: branch name may not contain spaces." >&2
-    exit 1
-  fi
+    echo "Error: branch name may not contain spaces." >&2; exit 1; fi
   if printf '%s' "$BRANCH_NAME" | grep -q '^/'; then
-    echo "Error: branch name may not start with /." >&2
-    exit 1
-  fi
+    echo "Error: branch name may not start with /." >&2; exit 1; fi
+fi
+
+if [ $IS_EXISTING -eq 1 ]; then
+  SESSION_NAME="$BRANCH_NAME"
+  WORKTREE_PATH="$GIT_ROOT/$SESSION_NAME"
+else
   SESSION_NAME=${BRANCH_NAME//\//_}
   WORKTREE_PATH="$GIT_ROOT/$SESSION_NAME"
 fi
@@ -87,7 +97,7 @@ if [ -d "$WORKTREE_PATH" ]; then
   cd "$WORKTREE_PATH"
 else
   cd "$GIT_ROOT"
-  echo "Checking if branch exists on remote: $BRANCH_NAME"
+  echo "Preparing worktree for branch: $BRANCH_NAME"
   if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null 2>&1; then
     if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
       git worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
@@ -95,7 +105,7 @@ else
       git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "origin/$BRANCH_NAME"
     fi
   else
-    echo "Branch does not exist on remote - creating from $DEFAULT_BRANCH"
+    echo "Remote branch not found; creating from $DEFAULT_BRANCH"
     git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" "$DEFAULT_BRANCH"
   fi
 fi
