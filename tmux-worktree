@@ -34,17 +34,37 @@ if [ -n "${TMUX:-}" ]; then
   exit 1
 fi
 
-# Use fzf to list worktrees and capture the selected item
-SELECTED=$(find "$WORKTREE_SEARCH_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | fzf --prompt="Select a worktree: " --preview="ls -l $WORKTREE_SEARCH_DIR/{}" --preview-window=up:5 --print-query | tail -n1)
+# List existing worktree directories
+EXISTING_DIRS=$(find "$WORKTREE_SEARCH_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -u)
 
-# If no input is provided, exit
-if [ -z "$SELECTED" ]; then
-  echo "No input provided. Exiting."
-  exit 1
+# fzf: allow typing a new branch name not yet a worktree
+RAW=$(printf '%s\n' "$EXISTING_DIRS" | fzf --prompt="Select or type branch: " --print-query --preview='SEL={}; if [ -n "$SEL" ]; then ls -l "$WORKTREE_SEARCH_DIR/$SEL" 2>/dev/null || echo "(new)"; fi' --preview-window=up:5)
+QUERY=$(printf '%s' "$RAW" | sed -n '1p')
+CHOICE=$(printf '%s' "$RAW" | sed -n '$p')
+
+if [ -n "$CHOICE" ] && printf '%s\n' "$EXISTING_DIRS" | grep -Fxq "$CHOICE"; then
+  # Existing worktree chosen
+  SESSION_NAME="$CHOICE"
+  WORKTREE_PATH="$GIT_ROOT/$SESSION_NAME"
+  BRANCH_NAME="$CHOICE"
+else
+  BRANCH_NAME="$QUERY"
+  if [ -z "$BRANCH_NAME" ]; then
+    echo "No input provided. Exiting." >&2
+    exit 1
+  fi
+  # Basic validation
+  if printf '%s' "$BRANCH_NAME" | grep -q '[[:space:]]'; then
+    echo "Error: branch name may not contain spaces." >&2
+    exit 1
+  fi
+  if printf '%s' "$BRANCH_NAME" | grep -q '^/'; then
+    echo "Error: branch name may not start with /." >&2
+    exit 1
+  fi
+  SESSION_NAME=${BRANCH_NAME//\//_}
+  WORKTREE_PATH="$GIT_ROOT/$SESSION_NAME"
 fi
-
-SESSION_NAME=$(basename "$SELECTED")
-WORKTREE_PATH="$GIT_ROOT/$SESSION_NAME"
 
 # Determine default branch dynamically
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-}"
@@ -67,12 +87,16 @@ if [ -d "$WORKTREE_PATH" ]; then
   cd "$WORKTREE_PATH"
 else
   cd "$GIT_ROOT"
-  echo "Checking if branch exists on remote"
-  if git ls-remote --exit-code --heads origin "$SELECTED" >/dev/null 2>&1; then
-    git worktree add -b "$SELECTED" "$WORKTREE_PATH" "origin/$SELECTED"
+  echo "Checking if branch exists on remote: $BRANCH_NAME"
+  if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null 2>&1; then
+    if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+      git worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
+    else
+      git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "origin/$BRANCH_NAME"
+    fi
   else
-    echo "Branch does not exist on remote - adding new local worktree (base: $DEFAULT_BRANCH)"
-    git worktree add "$WORKTREE_PATH" -b "$SELECTED" "$DEFAULT_BRANCH"
+    echo "Branch does not exist on remote - creating from $DEFAULT_BRANCH"
+    git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" "$DEFAULT_BRANCH"
   fi
 fi
 
