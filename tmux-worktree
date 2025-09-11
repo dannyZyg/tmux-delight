@@ -26,6 +26,12 @@ if ! command -v tmuxp >/dev/null 2>&1; then
   exit 1
 fi
 
+# Ensure fzf is installed
+if ! command -v fzf >/dev/null 2>&1; then
+  echo "Error: fzf is not installed or not in PATH." >&2
+  exit 1
+fi
+
 if [ ! -d "$GIT_ROOT" ]; then
   echo "Error: path '$GIT_ROOT' does not exist." >&2
   exit 1
