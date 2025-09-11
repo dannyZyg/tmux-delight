@@ -1,38 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 
-# Usage: tmux-worktree <git-worktree-root> [init-script]
+# Usage: tmux-worktree <git-worktree-root> <tmuxp-layout-yaml>
 # <git-worktree-root> is the bare repo (or directory containing worktrees/)
-# [init-script] optional path to a shell script sourced only when a NEW tmux session is created.
+# <tmuxp-layout-yaml> path to a tmuxp layout yaml file
+# Example: tmux-worktree /path/to/bare/repo ~/scripts/layouts/kraken-worktree.yaml
 
-if [ $# -lt 1 ]; then
-  echo "Usage: $(basename "$0") <git-worktree-root> [init-script]" >&2
+if [ $# -lt 2 ]; then
+  echo "Usage: $(basename "$0") <git-worktree-root> <tmuxp-layout-yaml>" >&2
   exit 1
 fi
 
 GIT_ROOT=$1
-INIT_SCRIPT=${2:-}
+LAYOUT_FILE=$2
 WORKTREE_SEARCH_DIR="$GIT_ROOT/worktrees"
 
-if [ -n "$INIT_SCRIPT" ]; then
-  if [ ! -f "$INIT_SCRIPT" ]; then
-    echo "Error: init script '$INIT_SCRIPT' not found." >&2
-    exit 1
-  fi
-  if [ ! -r "$INIT_SCRIPT" ]; then
-    echo "Error: init script '$INIT_SCRIPT' not readable." >&2
-    exit 1
-  fi
-  # resolve to absolute path if possible (prefer realpath, fallback)
-  if command -v realpath >/dev/null 2>&1; then
-    INIT_SCRIPT=$(realpath "$INIT_SCRIPT")
-  else
-    case $INIT_SCRIPT in
-      /*) ;; # already absolute
-      *) INIT_SCRIPT="$PWD/$INIT_SCRIPT";;
-    esac
-  fi
-fi
+# Expand leading ~/ in layout path without using eval
+case "$LAYOUT_FILE" in
+  ~/*) LAYOUT_FILE="$HOME/${LAYOUT_FILE#~/}" ;;
+esac
 
 if [ ! -d "$GIT_ROOT" ]; then
   echo "Error: path '$GIT_ROOT' does not exist." >&2
@@ -44,15 +30,13 @@ if [ ! -d "$WORKTREE_SEARCH_DIR" ]; then
   exit 1
 fi
 
-# Check if TMUX_CONFIG is set
-if [ -z "${TMUX_CONFIG:-}" ]; then
-  echo "Error: TMUX_CONFIG is not set. Exiting." >&2
+if [ ! -f "$LAYOUT_FILE" ]; then
+  echo "Error: layout file '$LAYOUT_FILE' not found." >&2
   exit 1
 fi
 
-# If already inside a tmux session, abort (must detach first)
-if [ -n "${TMUX:-}" ]; then
-  echo "Error: already inside a tmux session. Detach/exit tmux first." >&2
+if [ -z "${TMUX_CONFIG:-}" ]; then
+  echo "Error: TMUX_CONFIG is not set. Exiting." >&2
   exit 1
 fi
 
@@ -132,13 +116,4 @@ else
   fi
 fi
 
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-  tmux attach-session -t "$SESSION_NAME"
-else
-  tmux -f "$TMUX_CONFIG" new-session -d -s "$SESSION_NAME" -c "$WORKTREE_PATH"
-  if [ -n "${INIT_SCRIPT:-}" ]; then
-    # Source the init script inside the new session before attaching
-    tmux send-keys -t "$SESSION_NAME" "source '$INIT_SCRIPT'" C-m
-  fi
-  tmux attach-session -t "$SESSION_NAME"
-fi
+GIT_WORKTREE=$SESSION_NAME tmuxp load "$LAYOUT_FILE"
