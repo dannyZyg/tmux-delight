@@ -1,0 +1,12 @@
+session_name: ${SESSION_NAME}
+start_directory: ${START_DIR}
+windows:
+  - window_name: git
+    panes:
+      - lazygit
+  - window_name: neovim
+    panes:
+      - nvim
+  - window_name: long running
+    panes:
+      - ""

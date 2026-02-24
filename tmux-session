@@ -1,0 +1,255 @@
+#!/bin/bash
+set -euo pipefail
+
+# Usage: tmux-session --layouts-dir <path>
+# Scans a directory of tmuxp layout files, lets you select one via fzf,
+# then creates a new tmux session or attaches to an existing one.
+#
+# Supports two file types:
+# 1. Full tmuxp layouts (files with session_name or windows keys)
+# 2. Overlay files (files with template and env keys) that reference a base template
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") --layouts-dir <path>
+
+Options:
+  --layouts-dir <path>  Directory containing tmuxp layout files (required)
+  --help                Show this help message
+
+Example:
+  $(basename "$0") --layouts-dir ~/.config/tmuxp
+EOF
+  exit "${1:-0}"
+}
+
+# Parse arguments
+LAYOUTS_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --layouts-dir)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --layouts-dir requires a path argument." >&2
+        exit 1
+      fi
+      LAYOUTS_DIR="$2"
+      shift 2
+      ;;
+    --help)
+      usage 0
+      ;;
+    *)
+      echo "Error: Unknown argument: $1" >&2
+      usage 1
+      ;;
+  esac
+done
+
+# Validate required argument
+if [[ -z "$LAYOUTS_DIR" ]]; then
+  echo "Error: --layouts-dir is required." >&2
+  usage 1
+fi
+
+# Expand leading ~/ in path
+case "$LAYOUTS_DIR" in
+  ~/*) LAYOUTS_DIR="$HOME/${LAYOUTS_DIR#~/}" ;;
+esac
+
+# Check dependencies
+if ! command -v fzf >/dev/null 2>&1; then
+  echo "Error: fzf is not installed or not in PATH." >&2
+  exit 1
+fi
+
+if ! command -v tmuxp >/dev/null 2>&1; then
+  echo "Error: tmuxp is not installed or not in PATH." >&2
+  exit 1
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "Error: tmux is not installed or not in PATH." >&2
+  exit 1
+fi
+
+if ! command -v yq >/dev/null 2>&1; then
+  echo "Error: yq is not installed or not in PATH." >&2
+  exit 1
+fi
+
+# Validate layouts directory
+if [[ ! -d "$LAYOUTS_DIR" ]]; then
+  echo "Error: Layouts directory '$LAYOUTS_DIR' does not exist." >&2
+  exit 1
+fi
+
+# Find all layout files
+ALL_LAYOUT_FILES=()
+while IFS= read -r file; do
+  ALL_LAYOUT_FILES+=("$file")
+done < <(find "$LAYOUTS_DIR" -maxdepth 1 -type f \( -name "*.yaml" -o -name "*.yml" \) | sort)
+
+if [[ ${#ALL_LAYOUT_FILES[@]} -eq 0 ]]; then
+  echo "Error: No layout files (*.yaml, *.yml) found in '$LAYOUTS_DIR'." >&2
+  exit 1
+fi
+
+# Build exclusion set: find all template files referenced by overlay files
+EXCLUDED_FILES=()
+for file in "${ALL_LAYOUT_FILES[@]}"; do
+  TEMPLATE=$(yq '.template // ""' "$file" 2>/dev/null) || continue
+  if [[ -n "$TEMPLATE" ]]; then
+    # Resolve template path
+    case "$TEMPLATE" in
+      ./*) RESOLVED_TEMPLATE="${LAYOUTS_DIR}/${TEMPLATE#./}" ;;
+      *)   RESOLVED_TEMPLATE="$TEMPLATE" ;;
+    esac
+    # Normalize to absolute path for comparison
+    if [[ -f "$RESOLVED_TEMPLATE" ]]; then
+      RESOLVED_TEMPLATE=$(cd "$(dirname "$RESOLVED_TEMPLATE")" && pwd)/$(basename "$RESOLVED_TEMPLATE")
+      EXCLUDED_FILES+=("$RESOLVED_TEMPLATE")
+    fi
+  fi
+done
+
+# Helper function to check if a file is in the exclusion list
+is_excluded() {
+  local file="$1"
+  for excluded in "${EXCLUDED_FILES[@]}"; do
+    if [[ "$file" == "$excluded" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Build selectable files list (excluding template files)
+SELECTABLE_FILES=()
+for file in "${ALL_LAYOUT_FILES[@]}"; do
+  # Normalize to absolute path for comparison
+  ABS_FILE=$(cd "$(dirname "$file")" && pwd)/$(basename "$file")
+  if ! is_excluded "$ABS_FILE"; then
+    SELECTABLE_FILES+=("$file")
+  fi
+done
+
+if [[ ${#SELECTABLE_FILES[@]} -eq 0 ]]; then
+  echo "Error: No selectable layout files found (all files are templates)." >&2
+  exit 1
+fi
+
+# Extract basenames without extension for display
+DISPLAY_NAMES=()
+for file in "${SELECTABLE_FILES[@]}"; do
+  basename=$(basename "$file")
+  name="${basename%.*}"
+  DISPLAY_NAMES+=("$name")
+done
+
+# Present fzf selection with preview
+SELECTED=$(printf '%s\n' "${DISPLAY_NAMES[@]}" | fzf \
+  --prompt="Select layout: " \
+  --preview="cat '${LAYOUTS_DIR}/{}.yaml' 2>/dev/null || cat '${LAYOUTS_DIR}/{}.yml' 2>/dev/null" \
+  --preview-window=right:60%:wrap) || true
+
+if [[ -z "$SELECTED" ]]; then
+  echo "No layout selected. Exiting." >&2
+  exit 1
+fi
+
+# Get the full path to the selected layout
+LAYOUT_FILE=""
+if [[ -f "${LAYOUTS_DIR}/${SELECTED}.yaml" ]]; then
+  LAYOUT_FILE="${LAYOUTS_DIR}/${SELECTED}.yaml"
+elif [[ -f "${LAYOUTS_DIR}/${SELECTED}.yml" ]]; then
+  LAYOUT_FILE="${LAYOUTS_DIR}/${SELECTED}.yml"
+fi
+
+if [[ -z "$LAYOUT_FILE" ]]; then
+  echo "Error: Could not find layout file for '$SELECTED'." >&2
+  exit 1
+fi
+
+# Determine file type: layout (has session_name or windows) vs overlay (has template)
+IS_LAYOUT=$(yq 'has("session_name") or has("windows")' "$LAYOUT_FILE")
+HAS_TEMPLATE=$(yq 'has("template")' "$LAYOUT_FILE")
+
+if [[ "$IS_LAYOUT" == "true" ]]; then
+  FILE_TYPE="layout"
+elif [[ "$HAS_TEMPLATE" == "true" ]]; then
+  FILE_TYPE="overlay"
+else
+  echo "Error: Invalid file format for '$SELECTED'. File must either be a tmuxp layout (with session_name or windows) or an overlay file (with template and env)." >&2
+  exit 1
+fi
+
+# Extract session name based on file type
+if [[ "$FILE_TYPE" == "layout" ]]; then
+  SESSION_NAME=$(yq '.session_name' "$LAYOUT_FILE")
+  if [[ -z "$SESSION_NAME" || "$SESSION_NAME" == "null" ]]; then
+    echo "Error: Layout file must have a session_name." >&2
+    exit 1
+  fi
+else
+  # Overlay file: parse env vars to find SESSION_NAME
+  SESSION_NAME=""
+  while IFS= read -r env_line; do
+    if [[ "$env_line" == SESSION_NAME=* ]]; then
+      SESSION_NAME="${env_line#SESSION_NAME=}"
+      break
+    fi
+  done < <(yq '.env[]' "$LAYOUT_FILE" 2>/dev/null)
+
+  if [[ -z "$SESSION_NAME" ]]; then
+    echo "Error: Overlay file must define SESSION_NAME in env." >&2
+    exit 1
+  fi
+fi
+
+# Check if session already exists
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  echo "Session '$SESSION_NAME' already exists. Attaching..."
+  if [[ -n "${TMUX:-}" ]]; then
+    # Inside tmux: switch client
+    tmux switch-client -t "$SESSION_NAME"
+  else
+    # Outside tmux: attach
+    tmux attach -t "$SESSION_NAME"
+  fi
+  exit 0
+fi
+
+# Create new session based on file type
+if [[ "$FILE_TYPE" == "layout" ]]; then
+  echo "Creating session '$SESSION_NAME' from layout..."
+  tmuxp load -y "$LAYOUT_FILE"
+else
+  # Overlay file: resolve template, export env vars, load template
+  TEMPLATE=$(yq '.template' "$LAYOUT_FILE")
+
+  # Resolve template path
+  case "$TEMPLATE" in
+    ./*) TEMPLATE_FILE="${LAYOUTS_DIR}/${TEMPLATE#./}" ;;
+    *)   TEMPLATE_FILE="$TEMPLATE" ;;
+  esac
+
+  # Expand ~/ in template path
+  case "$TEMPLATE_FILE" in
+    ~/*) TEMPLATE_FILE="$HOME/${TEMPLATE_FILE#~/}" ;;
+  esac
+
+  # Validate template exists
+  if [[ ! -f "$TEMPLATE_FILE" ]]; then
+    echo "Error: Template file '$TEMPLATE_FILE' not found." >&2
+    exit 1
+  fi
+
+  # Export all env vars
+  while IFS= read -r env_line; do
+    export "$env_line"
+  done < <(yq '.env[]' "$LAYOUT_FILE")
+
+  echo "Creating session '$SESSION_NAME' from template..."
+  tmuxp load -y "$TEMPLATE_FILE"
+fi

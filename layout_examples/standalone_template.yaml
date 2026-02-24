@@ -1,0 +1,12 @@
+session_name: my_project
+start_directory: ~/projects/my_project/
+windows:
+  - window_name: opencode
+    panes:
+      - opencode
+  - window_name: neovim
+    panes:
+      - nvim
+  - window_name: lrp
+    panes:
+      - ""

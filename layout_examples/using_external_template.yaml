@@ -1,0 +1,4 @@
+env:
+  - SESSION_NAME=my_project
+  - START_DIR=~/projects/my_project
+template: ./default.yaml
